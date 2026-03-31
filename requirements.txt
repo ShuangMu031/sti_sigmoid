@@ -1,0 +1,16 @@
+numpy>=1.19.0,<1.24.0
+opencv-python>=4.5.0,<4.7.0
+scipy>=1.7.0,<1.9.0
+matplotlib>=3.4.0,<3.6.0
+pyyaml>=6.0
+Pillow>=9.0.0
+PyMaxflow>=0.2.8
+pyinstaller<5.0.0
+pyinstaller-hooks-contrib>=2022.0
+
+# 注意事项：
+# 1. 推荐使用指定的版本范围以确保兼容性
+# 2. 安装命令：pip install -r requirements.txt
+# 3. 建议在虚拟环境中安装依赖项
+# 4. Windows系统需要安装Visual C++ Redistributable 2019
+# 5. 排除了numba模块，因为它在打包时可能会导致问题
