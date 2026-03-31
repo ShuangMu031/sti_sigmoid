@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import maxflow
 from stitcher.algorithms.hist_otsu import histOstu
+from stitcher.config import GC_SALIENCY_WEIGHT, GC_OBJECT_WEIGHT, GC_EDGE_PENALTY
 
 
 def sigmoid(x, alpha, beta=20.0):
@@ -29,6 +30,7 @@ def build_graph_cut_cost(
     INF = 1e9
     h, w = img1.shape[:2]
 
+    # 颜色差异代价
     diff = np.linalg.norm(
         img1.astype(np.float32) - img2.astype(np.float32), axis=2
     )
@@ -36,13 +38,29 @@ def build_graph_cut_cost(
 
     overlap = valid1 & valid2
     alpha = histOstu(diff[overlap]) if np.any(overlap) else 0.5
-    data_base = sigmoid(diff, alpha)
+    color_cost = sigmoid(diff, alpha)
 
-    data1 = data_base.copy()
-    data2 = data_base.copy()
+    # 显著性代价 - 优先选择显著性高的区域
+    saliency_cost1 = pMap1 / (pMap1.max() + eps) if pMap1.max() > 0 else np.zeros_like(pMap1)
+    saliency_cost2 = pMap2 / (pMap2.max() + eps) if pMap2.max() > 0 else np.zeros_like(pMap2)
+
+    # 边缘代价 - 避免在边缘处切割
+    edge_cost1 = edge1 / (edge1.max() + eps) if edge1.max() > 0 else np.zeros_like(edge1)
+    edge_cost2 = edge2 / (edge2.max() + eps) if edge2.max() > 0 else np.zeros_like(edge2)
+
+    # 组合代价
+    data1 = color_cost + \
+            GC_SALIENCY_WEIGHT * saliency_cost2 + \
+            GC_EDGE_PENALTY * edge_cost2
+    data2 = color_cost + \
+            GC_SALIENCY_WEIGHT * saliency_cost1 + \
+            GC_EDGE_PENALTY * edge_cost1
+
+    # 确保有效区域
     data1[~valid1] = INF
     data2[~valid2] = INF
 
+    # 平滑代价 - 基于梯度
     gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, 3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, 3)
@@ -112,12 +130,9 @@ def graph_cut_seam(
         [0, 1, 0]
     ], dtype=np.int32)
 
-    edge_cost = edge1_w + edge2_w
-    smooth_weight = 1.0 / (1.0 + edge_cost)
-
     g.add_grid_edges(
         node_ids,
-        smooth_weight,
+        smooth,
         structure=structure,
         symmetric=True
     )

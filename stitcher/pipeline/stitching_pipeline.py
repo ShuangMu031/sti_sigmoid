@@ -80,7 +80,8 @@ class StitchingPipeline:
             sal2, edge2 = future2.result()
 
         self._report_progress(global_step_offset + 2, max(total_pairs * phase_total, 1), f"{pair_prefix}：计算单应性变换矩阵...")
-        h_matrix = registerTexture(moving_img, edge1, base_img, edge2)
+        detector_type = self.config.get('FEATURE_DETECTOR', 'ORB')
+        h_matrix = registerTexture(moving_img, edge1, base_img, edge2, detector_type=detector_type)
         self.logger.info(f"{pair_prefix} 单应性变换矩阵: {h_matrix}")
 
         self._report_progress(global_step_offset + 3, max(total_pairs * phase_total, 1), f"{pair_prefix}：图像对齐中...")
