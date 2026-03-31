@@ -71,26 +71,54 @@ def registerTexture(img1, edge1, img2, edge2, detector_type=None):
     gray1 = (gray1 * edge1).astype(np.uint8)
     gray2 = (gray2 * edge2).astype(np.uint8)
 
-    detector = create_feature_detector(detector_type)
-    kp1, des1 = detector.detectAndCompute(gray1, None)
-    kp2, des2 = detector.detectAndCompute(gray2, None)
+    # 尝试使用指定的检测器，如果失败则自动尝试其他检测器
+    detectors_to_try = [detector_type] if detector_type else []
+    
+    # 添加备用检测器
+    if 'ORB' not in detectors_to_try:
+        detectors_to_try.append('ORB')
+    if 'SIFT' not in detectors_to_try:
+        detectors_to_try.append('SIFT')
+    if 'AKAZE' not in detectors_to_try:
+        detectors_to_try.append('AKAZE')
 
-    if des1 is None or des2 is None:
-        raise RuntimeError("Feature detection failed")
+    last_error = None
+    for det_type in detectors_to_try:
+        try:
+            logger.info(f"尝试使用 {det_type} 检测器")
+            detector = create_feature_detector(det_type)
+            kp1, des1 = detector.detectAndCompute(gray1, None)
+            kp2, des2 = detector.detectAndCompute(gray2, None)
 
-    matcher = create_matcher(detector_type or FEATURE_DETECTOR)
-    matches = matcher.knnMatch(des1, des2, k=2)
+            if des1 is None or des2 is None:
+                last_error = f"{det_type} 特征检测失败"
+                continue
 
-    good = []
-    for match_pair in matches:
-        if len(match_pair) < 2:
+            matcher = create_matcher(det_type)
+            matches = matcher.knnMatch(des1, des2, k=2)
+
+            good = []
+            for match_pair in matches:
+                if len(match_pair) < 2:
+                    continue
+                m, n = match_pair
+                if m.distance < SIFT_RATIO_THRESH * n.distance:
+                    good.append(m)
+
+            if len(good) < 8:
+                last_error = f"{det_type} 匹配点不足"
+                continue
+
+            # 成功找到足够的匹配点
+            logger.info(f"成功使用 {det_type} 检测器，找到 {len(good)} 个匹配点")
+            break
+        except Exception as e:
+            last_error = f"{det_type} 处理失败: {str(e)}"
+            logger.warning(last_error)
             continue
-        m, n = match_pair
-        if m.distance < SIFT_RATIO_THRESH * n.distance:
-            good.append(m)
-
-    if len(good) < 8:
-        raise RuntimeError("Too few good matches")
+    else:
+        # 所有检测器都失败
+        raise RuntimeError(f"所有特征检测器都失败: {last_error}")
 
     pts1 = np.array([kp1[m.queryIdx].pt for m in good])
     pts2 = np.array([kp2[m.trainIdx].pt for m in good])

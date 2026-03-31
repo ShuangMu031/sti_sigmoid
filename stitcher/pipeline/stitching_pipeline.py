@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import time
 from pathlib import Path
+import concurrent.futures
 
 from stitcher.common.logger import get_logger
 from stitcher.common.image_utils import ensure_directory
@@ -56,6 +57,12 @@ class StitchingPipeline:
         seam &= overlap.astype(np.uint8)
         return seam
 
+    def _extract_features(self, img):
+        """提取图像特征"""
+        sal = mbs_saliency(img)
+        edge, _ = canny_edge_detect(img)
+        return sal, edge
+
     def _stitch_pair(self, moving_img, base_img, pair_index=1, total_pairs=1, global_step_offset=0):
         phase_total = 7
         pair_prefix = f"第 {pair_index}/{total_pairs} 组"
@@ -64,10 +71,13 @@ class StitchingPipeline:
         feather_radius = self.config.get('FEATHER_RADIUS', 11)
 
         self._report_progress(global_step_offset + 1, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行显著性和边缘检测...")
-        sal1 = mbs_saliency(moving_img)
-        sal2 = mbs_saliency(base_img)
-        edge1, _ = canny_edge_detect(moving_img)
-        edge2, _ = canny_edge_detect(base_img)
+        
+        # 并行处理特征提取
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future1 = executor.submit(self._extract_features, moving_img)
+            future2 = executor.submit(self._extract_features, base_img)
+            sal1, edge1 = future1.result()
+            sal2, edge2 = future2.result()
 
         self._report_progress(global_step_offset + 2, max(total_pairs * phase_total, 1), f"{pair_prefix}：计算单应性变换矩阵...")
         h_matrix = registerTexture(moving_img, edge1, base_img, edge2)

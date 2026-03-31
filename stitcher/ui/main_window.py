@@ -21,6 +21,7 @@ if sys.platform == 'win32':
 from stitcher.common.logger import get_logger, setup_logger
 from stitcher.io.image_io import cv_imread, cv_imwrite
 from stitcher.workers import run_stitching_worker
+from stitcher.algorithms import sort_images_by_overlap
 
 logs_dir = Path(__file__).parent.parent.parent / 'logs'
 logs_dir.mkdir(exist_ok=True)
@@ -102,6 +103,13 @@ class StitchingGUI:
             command=self.select_images
         )
 
+        self.preview_btn = ttk.Button(
+            self.control_frame,
+            text="预览顺序",
+            command=self.preview_order,
+            state=tk.DISABLED
+        )
+
         self.stitch_btn = ttk.Button(
             self.control_frame,
             text="开始拼接",
@@ -144,12 +152,28 @@ class StitchingGUI:
         self.feather_radius_value_label = ttk.Label(self.params_frame, text=str(self.feather_radius_var.get()))
         self.feather_radius_var.trace_add('write', self._update_feather_radius_value)
 
+        self.detector_label = ttk.Label(self.params_frame, text="特征检测器:")
+        self.detector_var = tk.StringVar(value="ORB")
+        self.detector_combo = ttk.Combobox(
+            self.params_frame,
+            textvariable=self.detector_var,
+            values=["ORB", "SIFT", "AKAZE"],
+            state="readonly"
+        )
+
+        self.auto_sort_label = ttk.Label(self.params_frame, text="自动排序:")
+        self.auto_sort_var = tk.BooleanVar(value=True)
+        self.auto_sort_checkbox = ttk.Checkbutton(
+            self.params_frame,
+            variable=self.auto_sort_var
+        )
+
         self.stitching_time_label = ttk.Label(
             self.params_frame,
             text="拼接时间: 0.00s",
             font=("Arial", 9)
         )
-        self.stitching_time_label.grid(row=6, column=0, columnspan=3, pady=(10, 0), sticky=tk.W, padx=5)
+        self.stitching_time_label.grid(row=8, column=0, columnspan=3, pady=(10, 0), sticky=tk.W, padx=5)
 
         self.progress_frame = ttk.Frame(self.params_frame)
         self.progress_frame.grid(row=7, column=0, columnspan=3, sticky=tk.EW, padx=5, pady=5)
@@ -222,6 +246,7 @@ class StitchingGUI:
 
         button_style = {'fill': tk.X, 'pady': 5, 'padx': 5}
         self.select_images_btn.pack(**button_style)
+        self.preview_btn.pack(**button_style)
         self.stitch_btn.pack(**button_style)
         self.clear_btn.pack(**button_style)
         self.save_btn.pack(**button_style)
@@ -235,6 +260,12 @@ class StitchingGUI:
         self.feather_radius_label.grid(row=3, column=0, sticky=tk.W, padx=5, pady=(10, 0))
         self.feather_radius_scale.grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=5)
         self.feather_radius_value_label.grid(row=4, column=2, sticky=tk.W, padx=5)
+
+        self.detector_label.grid(row=5, column=0, sticky=tk.W, padx=5, pady=(10, 0))
+        self.detector_combo.grid(row=5, column=1, columnspan=2, sticky=tk.W, padx=5)
+
+        self.auto_sort_label.grid(row=6, column=0, sticky=tk.W, padx=5, pady=(5, 0))
+        self.auto_sort_checkbox.grid(row=6, column=1, sticky=tk.W, padx=5)
 
         self.params_frame.columnconfigure(1, weight=1)
         self.params_frame.columnconfigure(0, weight=0)
@@ -272,8 +303,10 @@ class StitchingGUI:
             self._display_selected_images(self.image_paths)
             if len(self.image_paths) >= 2:
                 self.stitch_btn.config(state=tk.NORMAL)
+                self.preview_btn.config(state=tk.NORMAL)
             else:
                 self.stitch_btn.config(state=tk.DISABLED)
+                self.preview_btn.config(state=tk.DISABLED)
 
             logger.info(f"用户选择了 {len(self.image_paths)} 张图像（按当前顺序依次拼接）")
 
@@ -371,7 +404,9 @@ class StitchingGUI:
 
         config = {
             'SEAM_BAND': self.seam_band_var.get(),
-            'FEATHER_RADIUS': self.feather_radius_var.get()
+            'FEATHER_RADIUS': self.feather_radius_var.get(),
+            'FEATURE_DETECTOR': self.detector_var.get(),
+            'AUTO_SORT': self.auto_sort_var.get()
         }
 
         output_dir = Path(__file__).parent.parent.parent / 'outputs'
@@ -621,8 +656,102 @@ class StitchingGUI:
             self.save_btn.config(state=tk.DISABLED)
             self.file_menu.entryconfig(1, state=tk.DISABLED)
             self.stitch_btn.config(state=tk.DISABLED)
+            self.preview_btn.config(state=tk.DISABLED)
             self.status_var.set("就绪")
             logger.info("已清除所有数据")
+
+    def preview_order(self):
+        if self.is_processing:
+            messagebox.showinfo("提示", "当前正在拼接，请等待当前任务完成。")
+            return
+
+        if len(self.image_paths) < 2:
+            messagebox.showwarning("警告", "请至少选择两张图像进行预览")
+            return
+
+        self.status_var.set("正在分析图像顺序...")
+        self.root.update_idletasks()
+
+        try:
+            # 加载图像
+            images = []
+            for image_path in self.image_paths:
+                img = cv_imread(image_path)
+                if img is None:
+                    raise RuntimeError(f"无法读取图像文件: {image_path}")
+                images.append(img)
+
+            # 计算最佳拼接顺序
+            order = sort_images_by_overlap(
+                images, 
+                detector_type=self.detector_var.get()
+            )
+
+            # 显示预览结果
+            preview_window = tk.Toplevel(self.root)
+            preview_window.title("拼接顺序预览")
+            preview_window.geometry("600x400")
+
+            # 创建滚动区域
+            canvas = tk.Canvas(preview_window)
+            scrollbar = ttk.Scrollbar(preview_window, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+
+            # 创建内部框架
+            frame = ttk.Frame(canvas)
+            canvas.create_window((0, 0), window=frame, anchor="nw")
+
+            # 显示排序后的图像
+            thumbnail_size = (120, 80)
+            margin = 10
+            refs = []
+
+            ttk.Label(frame, text="推荐的拼接顺序:", font=("Arial", 12, "bold")).pack(pady=10)
+
+            for i, idx in enumerate(order):
+                row_frame = ttk.Frame(frame)
+                row_frame.pack(fill="x", pady=5, padx=10)
+
+                # 显示顺序编号
+                ttk.Label(row_frame, text=f"{i+1}.", width=3).pack(side="left", padx=5)
+
+                # 显示缩略图
+                try:
+                    image = cv2.cvtColor(images[idx], cv2.COLOR_BGR2RGB)
+                    image = Image.fromarray(image)
+                    image.thumbnail(thumbnail_size, Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(image)
+                    refs.append(photo)
+                    ttk.Label(row_frame, image=photo).pack(side="left", padx=5)
+                except Exception as e:
+                    ttk.Label(row_frame, text="[无法显示]", width=20).pack(side="left", padx=5)
+
+                # 显示文件名
+                file_name = os.path.basename(self.image_paths[idx])
+                ttk.Label(row_frame, text=file_name, wraplength=300).pack(side="left", padx=5, fill="x")
+
+            # 更新滚动区域
+            frame.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+            # 添加说明
+            ttk.Label(
+                frame, 
+                text="提示: 此预览基于图像特征的重叠度分析，\n实际拼接结果可能会有所不同。",
+                font=("Arial", 10, "italic"),
+                foreground="#666"
+            ).pack(pady=10, padx=10)
+
+            self.status_var.set("预览完成")
+            logger.info(f"图像排序预览完成，推荐顺序: {order}")
+
+        except Exception as e:
+            self.status_var.set("预览失败")
+            logger.error(f"预览顺序失败: {e}")
+            messagebox.showerror("错误", f"预览顺序时发生错误:\n{str(e)}")
 
     def show_about(self):
         about_text = "图像自动拼接系统\n\n" \
