@@ -1,5 +1,8 @@
 from .settings import *
 
+# 向后兼容：保持SIFT_RATIO_THRESH的导出
+SIFT_RATIO_THRESH = FEATURE_RATIO_THRESH
+
 __all__ = [
     'EPS',
     'CANNY_LOW_THRESH',
@@ -9,7 +12,8 @@ __all__ = [
     'MIN_NON_EDGE_AREA',
     'HIST_SHIFT_BIN_RATIO',
     'SIFT_EDGE_THRESH',
-    'SIFT_RATIO_THRESH',
+    'FEATURE_RATIO_THRESH',
+    'SIFT_RATIO_THRESH',  # 向后兼容
     'RANSAC_REPROJ_THRESH',
     'GC_SALIENCY_WEIGHT',
     'GC_OBJECT_WEIGHT',

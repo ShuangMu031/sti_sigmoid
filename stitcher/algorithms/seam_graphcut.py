@@ -48,12 +48,21 @@ def build_graph_cut_cost(
     edge_cost1 = edge1 / (edge1.max() + eps) if edge1.max() > 0 else np.zeros_like(edge1)
     edge_cost2 = edge2 / (edge2.max() + eps) if edge2.max() > 0 else np.zeros_like(edge2)
 
-    # 组合代价
+    # 物体代价 - 使用saliency和edge模拟物体区域，避免切割物体
+    # GC_OBJECT_WEIGHT 用于惩罚 seam 穿过显著性高和边缘多的区域
+    object_region1 = (pMap1 > 0.3) | (edge1 > 0.3)
+    object_region2 = (pMap2 > 0.3) | (edge2 > 0.3)
+    object_cost1 = object_region1.astype(np.float32)
+    object_cost2 = object_region2.astype(np.float32)
+
+    # 组合代价 - 集成GC_SALIENCY_WEIGHT, GC_OBJECT_WEIGHT, GC_EDGE_PENALTY
     data1 = color_cost + \
             GC_SALIENCY_WEIGHT * saliency_cost2 + \
+            GC_OBJECT_WEIGHT * object_cost2 + \
             GC_EDGE_PENALTY * edge_cost2
     data2 = color_cost + \
             GC_SALIENCY_WEIGHT * saliency_cost1 + \
+            GC_OBJECT_WEIGHT * object_cost1 + \
             GC_EDGE_PENALTY * edge_cost1
 
     # 确保有效区域
@@ -71,6 +80,11 @@ def build_graph_cut_cost(
     return data1, data2, smooth, overlap
 
 
+# 图割标签语义定义
+LABEL_SELECT_IMG1 = 0  # 选择img1_w (source, 移动图像)
+LABEL_SELECT_IMG2 = 1  # 选择img2_w (sink, 基础图像)
+
+
 def graph_cut_seam(
     img1_w, img2_w,
     sal1_w, sal2_w,
@@ -78,51 +92,98 @@ def graph_cut_seam(
     valid1, valid2,
     overlap
 ):
+    """
+    使用Graph Cut算法确定最佳接缝位置。
+    使用ROI裁剪优化性能，只在重叠区域内计算图割。
+
+    参数:
+        img1_w: 对齐后的移动图像 (warped)
+        img2_w: 对齐后的基础图像 (warped)
+        sal1_w, sal2_w: 对齐后的显著性图
+        edge1_w, edge2_w: 对齐后的边缘图
+        valid1, valid2: 有效区域掩码
+        overlap: 重叠区域掩码
+
+    返回:
+        label_map: uint8类型的标签图
+                 0 (LABEL_SELECT_IMG1) = 选择img1_w的像素
+                 1 (LABEL_SELECT_IMG2) = 选择img2_w的像素
+    """
     h, w = overlap.shape
+
+    # 如果没有重叠区域，直接返回全选择img2的标签图
+    if not np.any(overlap):
+        return np.full((h, w), LABEL_SELECT_IMG2, dtype=np.uint8)
+
+    # 计算重叠区域的ROI (Region of Interest)
+    ys, xs = np.where(overlap)
+    y0, y1 = ys.min(), ys.max()
+    x0, x1 = xs.min(), xs.max()
+
+    # 增加一些边距，确保边界条件正确处理
+    margin = 10
+    y0 = max(0, y0 - margin)
+    y1 = min(h, y1 + margin + 1)
+    x0 = max(0, x0 - margin)
+    x1 = min(w, x1 + margin + 1)
+
+    # 裁剪所有数据到ROI
+    img1_roi = img1_w[y0:y1, x0:x1]
+    img2_roi = img2_w[y0:y1, x0:x1]
+    sal1_roi = sal1_w[y0:y1, x0:x1]
+    sal2_roi = sal2_w[y0:y1, x0:x1]
+    edge1_roi = edge1_w[y0:y1, x0:x1]
+    edge2_roi = edge2_w[y0:y1, x0:x1]
+    valid1_roi = valid1[y0:y1, x0:x1]
+    valid2_roi = valid2[y0:y1, x0:x1]
+    overlap_roi = overlap[y0:y1, x0:x1]
+
+    # 在ROI内构建和求解图割
+    h_roi, w_roi = overlap_roi.shape
     g = maxflow.Graph[float]()
-    node_ids = g.add_grid_nodes((h, w))
+    node_ids_roi = g.add_grid_nodes((h_roi, w_roi))
 
     INF = 1e6
 
-    data1, data2, smooth, _ = build_graph_cut_cost(
-        img1_w, img2_w,
-        sal1_w, sal2_w,
-        edge1_w, edge2_w,
-        valid1, valid2
+    data1_roi, data2_roi, smooth_roi, _ = build_graph_cut_cost(
+        img1_roi, img2_roi,
+        sal1_roi, sal2_roi,
+        edge1_roi, edge2_roi,
+        valid1_roi, valid2_roi
     )
 
-    D1 = data1.copy()
-    D2 = data2.copy()
+    D1_roi = data1_roi.copy()
+    D2_roi = data2_roi.copy()
 
-    D1[~overlap] = 0
-    D2[~overlap] = 0
+    D1_roi[~overlap_roi] = 0
+    D2_roi[~overlap_roi] = 0
 
-    g.add_grid_tedges(node_ids, D1, D2)
+    g.add_grid_tedges(node_ids_roi, D1_roi, D2_roi)
 
-    A = valid1
-    B = valid2
-    C = overlap
+    A_roi = valid1_roi
+    B_roi = valid2_roi
+    C_roi = overlap_roi
 
-    boundary_B = compute_boundary(B)
-    boundary_C = compute_boundary(C)
+    boundary_B_roi = compute_boundary(B_roi)
+    boundary_C_roi = compute_boundary(C_roi)
 
-    seed_source = boundary_B & boundary_C
-    seed_sink = boundary_C & (~seed_source)
+    seed_source_roi = boundary_B_roi & boundary_C_roi
+    seed_sink_roi = boundary_C_roi & (~seed_source_roi)
 
     g.add_grid_tedges(
-        node_ids[seed_source],
+        node_ids_roi[seed_source_roi],
         0,
         INF
     )
 
     g.add_grid_tedges(
-        node_ids[seed_sink],
+        node_ids_roi[seed_sink_roi],
         INF,
         0
     )
 
-    g.add_grid_tedges(node_ids[~valid1], INF, 0)
-    g.add_grid_tedges(node_ids[~valid2], 0, INF)
+    g.add_grid_tedges(node_ids_roi[~valid1_roi], INF, 0)
+    g.add_grid_tedges(node_ids_roi[~valid2_roi], 0, INF)
 
     structure = np.array([
         [0, 1, 0],
@@ -131,15 +192,19 @@ def graph_cut_seam(
     ], dtype=np.int32)
 
     g.add_grid_edges(
-        node_ids,
-        smooth,
+        node_ids_roi,
+        smooth_roi,
         structure=structure,
         symmetric=True
     )
 
     g.maxflow()
-    labels = g.get_grid_segments(node_ids)
+    labels_roi = g.get_grid_segments(node_ids_roi)
 
-    label_map = labels.astype(np.uint8)
+    # 创建完整的label_map，默认选择img2
+    label_map = np.full((h, w), LABEL_SELECT_IMG2, dtype=np.uint8)
+    
+    # 将ROI的结果复制到完整的label_map中
+    label_map[y0:y1, x0:x1] = labels_roi.astype(np.uint8)
 
     return label_map

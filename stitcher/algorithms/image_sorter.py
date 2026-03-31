@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from stitcher.common.logger import get_logger
 from stitcher.algorithms.feature_registration import create_feature_detector, create_matcher
-from stitcher.config import SIFT_RATIO_THRESH
+from stitcher.config import FEATURE_RATIO_THRESH
 
 logger = get_logger(__name__)
 
@@ -27,7 +27,7 @@ def compute_pair_overlap(img1, img2, detector_type='ORB'):
             if len(match_pair) < 2:
                 continue
             m, n = match_pair
-            if m.distance < SIFT_RATIO_THRESH * n.distance:
+            if m.distance < FEATURE_RATIO_THRESH * n.distance:
                 good_matches.append(m)
         
         total_keypoints = min(len(kp1), len(kp2))

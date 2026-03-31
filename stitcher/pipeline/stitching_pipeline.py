@@ -17,7 +17,9 @@ from stitcher.algorithms import (
     compute_overlap_masks,
     graph_cut_seam,
     gradient_blend_local,
-    sort_images_by_overlap
+    sort_images_by_overlap,
+    LABEL_SELECT_IMG1,
+    LABEL_SELECT_IMG2
 )
 
 logger = get_logger(__name__)
@@ -104,7 +106,9 @@ class StitchingPipeline:
 
         self._report_progress(global_step_offset + 5, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行硬合成...")
         base = img2_w.copy()
-        base[label_map == 1] = img1_w[label_map == 1]
+        # LABEL_SELECT_IMG1=0: 选择img1_w的像素, LABEL_SELECT_IMG2=1: 选择img2_w的像素
+        # label_map == LABEL_SELECT_IMG1 时，我们用img1_w替换base中的像素
+        base[label_map == LABEL_SELECT_IMG1] = img1_w[label_map == LABEL_SELECT_IMG1]
 
         seam_line = self._extract_seam_line(label_map, overlap)
 
@@ -129,6 +133,26 @@ class StitchingPipeline:
         return result.astype(np.uint8)
 
     def run(self, output_path=None):
+        """
+        执行图像拼接流程。
+
+        当前实现：顺序拼接 (Sequential Stitching)
+            - 按顺序逐张拼接图像
+            - 当前一张作为移动图像，新图作为基础图像
+            - 注意：这种方法简单但可能累积误差，适合作为MVP版本
+
+        未来可扩展方向：
+            - Bundle Adjustment / 全局配准
+            - 光束法平差 (Bundle Adjustment)
+            - 同时优化所有图像的变换矩阵
+            - 减少误差累积
+
+        参数:
+            output_path: 输出文件路径，可选
+
+        返回:
+            拼接结果图像，或False表示失败
+        """
         try:
             t0 = time.time()
 
@@ -160,6 +184,13 @@ class StitchingPipeline:
                 images = [images[i] for i in order]
                 self.logger.info(f"图像排序结果: {order}")
 
+            # TODO: 未来实现全局配准版本
+            # - 计算所有图像间的单应性矩阵
+            # - 构建连接图
+            # - 执行全局优化
+            # - 使用Bundle Adjustment优化所有变换
+
+            # 当前：顺序拼接版本
             result = images[0]
             total_pairs = len(images) - 1
             total_steps = max(total_pairs * 7, 1)

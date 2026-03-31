@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from stitcher.common.logger import get_logger
 from stitcher.config import (
-    SIFT_RATIO_THRESH,
+    FEATURE_RATIO_THRESH,
     HIST_SHIFT_BIN_RATIO,
     RANSAC_REPROJ_THRESH,
     FEATURE_DETECTOR,
@@ -11,6 +11,7 @@ from stitcher.config import (
     FEATURE_FIRST_LEVEL,
     FEATURE_N_OCTAVE_LAYERS,
     FEATURE_PATCH_SIZE,
+    SIFT_EDGE_THRESH,
     FLANN_INDEX_PARAMS,
     FLANN_SEARCH_PARAMS,
     USE_FLANN
@@ -25,7 +26,7 @@ def create_feature_detector(detector_type=None):
     if detector_type.upper() == 'SIFT':
         return cv2.SIFT_create(
             contrastThreshold=0.0,
-            edgeThreshold=500
+            edgeThreshold=SIFT_EDGE_THRESH
         )
     elif detector_type.upper() == 'ORB':
         return cv2.ORB_create(
@@ -102,7 +103,7 @@ def registerTexture(img1, edge1, img2, edge2, detector_type=None):
                 if len(match_pair) < 2:
                     continue
                 m, n = match_pair
-                if m.distance < SIFT_RATIO_THRESH * n.distance:
+                if m.distance < FEATURE_RATIO_THRESH * n.distance:
                     good.append(m)
 
             if len(good) < 8:
