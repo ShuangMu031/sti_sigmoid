@@ -1,34 +1,91 @@
 import cv2
 import numpy as np
 from stitcher.common.logger import get_logger
-from stitcher.config import SIFT_RATIO_THRESH, HIST_SHIFT_BIN_RATIO, RANSAC_REPROJ_THRESH
+from stitcher.config import (
+    SIFT_RATIO_THRESH,
+    HIST_SHIFT_BIN_RATIO,
+    RANSAC_REPROJ_THRESH,
+    FEATURE_DETECTOR,
+    FEATURE_NPOINTS,
+    FEATURE_EDGE_THRESH,
+    FEATURE_FIRST_LEVEL,
+    FEATURE_N_OCTAVE_LAYERS,
+    FEATURE_PATCH_SIZE,
+    FLANN_INDEX_PARAMS,
+    FLANN_SEARCH_PARAMS,
+    USE_FLANN
+)
 
 logger = get_logger(__name__)
 
 
-def registerTexture(img1, edge1, img2, edge2):
+def create_feature_detector(detector_type=None):
+    detector_type = detector_type or FEATURE_DETECTOR
+    
+    if detector_type.upper() == 'SIFT':
+        return cv2.SIFT_create(
+            contrastThreshold=0.0,
+            edgeThreshold=500
+        )
+    elif detector_type.upper() == 'ORB':
+        return cv2.ORB_create(
+            nfeatures=FEATURE_NPOINTS,
+            edgeThreshold=FEATURE_EDGE_THRESH,
+            firstLevel=FEATURE_FIRST_LEVEL,
+            nlevels=FEATURE_N_OCTAVE_LAYERS,
+            patchSize=FEATURE_PATCH_SIZE
+        )
+    elif detector_type.upper() == 'AKAZE':
+        return cv2.AKAZE_create(
+            descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB_UPRIGHT,
+            threshold=0.001,
+            nOctaves=FEATURE_N_OCTAVE_LAYERS,
+            nOctaveLayers=4
+        )
+    else:
+        logger.warning(f"Unknown detector type: {detector_type}, falling back to ORB")
+        return cv2.ORB_create(nfeatures=FEATURE_NPOINTS)
+
+
+def create_matcher(descriptor_type='ORB'):
+    if USE_FLANN:
+        try:
+            if descriptor_type in ['ORB', 'AKAZE']:
+                return cv2.FlannBasedMatcher(FLANN_INDEX_PARAMS, FLANN_SEARCH_PARAMS)
+            else:
+                index_params = dict(algorithm=1, trees=5)
+                return cv2.FlannBasedMatcher(index_params, FLANN_SEARCH_PARAMS)
+        except Exception as e:
+            logger.warning(f"Failed to create FLANN matcher: {e}, falling back to BFMatcher")
+    
+    if descriptor_type in ['ORB', 'AKAZE']:
+        return cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    else:
+        return cv2.BFMatcher()
+
+
+def registerTexture(img1, edge1, img2, edge2, detector_type=None):
     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
     gray1 = (gray1 * edge1).astype(np.uint8)
     gray2 = (gray2 * edge2).astype(np.uint8)
 
-    sift = cv2.SIFT_create(
-        contrastThreshold=0.0,
-        edgeThreshold=500
-    )
-
-    kp1, des1 = sift.detectAndCompute(gray1, None)
-    kp2, des2 = sift.detectAndCompute(gray2, None)
+    detector = create_feature_detector(detector_type)
+    kp1, des1 = detector.detectAndCompute(gray1, None)
+    kp2, des2 = detector.detectAndCompute(gray2, None)
 
     if des1 is None or des2 is None:
-        raise RuntimeError("SIFT failed")
+        raise RuntimeError("Feature detection failed")
 
-    bf = cv2.BFMatcher()
-    matches = bf.knnMatch(des1, des2, k=2)
+    matcher = create_matcher(detector_type or FEATURE_DETECTOR)
+    matches = matcher.knnMatch(des1, des2, k=2)
 
     good = []
-    for m, n in matches:
+    for match_pair in matches:
+        if len(match_pair) < 2:
+            continue
+        m, n = match_pair
         if m.distance < SIFT_RATIO_THRESH * n.distance:
             good.append(m)
 
@@ -103,7 +160,7 @@ def _histogram_filter(pts1, pts2, shape, thr=0.1):
         (dx >= xbins[x0]) & (dx <= xbins[x1 + 1]) &
         (dy >= ybins[y0]) & (dy <= ybins[y1 + 1])
     )
-    logger.info(f"Matches after hist filter: {len(pts1)}")
+    logger.info(f"Matches after hist filter: {len(pts1[mask])}")
 
     return pts1[mask], pts2[mask]
 

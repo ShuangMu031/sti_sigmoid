@@ -18,6 +18,7 @@ def main():
 示例:
   python demo_cli.py image1.png image2.png image3.png -o result.png
   python demo_cli.py img1.jpg img2.jpg img3.jpg --seam-band 15 --feather-radius 20
+  python demo_cli.py img1.jpg img2.jpg img3.jpg --detector SIFT --no-auto-sort
 
 说明: 按输入顺序依次拼接多张图像。后一张作为基础图不动，当前拼接结果作为待变换图继续参与下一轮拼接。
         """
@@ -50,6 +51,19 @@ def main():
     )
 
     parser.add_argument(
+        '--detector',
+        choices=['SIFT', 'ORB', 'AKAZE'],
+        default='ORB',
+        help='特征检测器类型（默认：ORB）'
+    )
+
+    parser.add_argument(
+        '--no-auto-sort',
+        action='store_true',
+        help='禁用图像自动排序功能'
+    )
+
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='显示详细输出'
@@ -75,7 +89,9 @@ def main():
     pipeline = StitchingPipeline()
     pipeline.update_config({
         'SEAM_BAND': args.seam_band,
-        'FEATHER_RADIUS': args.feather_radius
+        'FEATHER_RADIUS': args.feather_radius,
+        'FEATURE_DETECTOR': args.detector,
+        'AUTO_SORT': not args.no_auto_sort
     })
     pipeline.load_images(args.images)
 

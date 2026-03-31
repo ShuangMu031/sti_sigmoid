@@ -7,7 +7,7 @@ from pathlib import Path
 from stitcher.common.logger import get_logger
 from stitcher.common.image_utils import ensure_directory
 from stitcher.io.image_io import cv_imread, cv_imwrite
-from stitcher.config import SEAM_BAND, FEATHER_RADIUS
+from stitcher.config import SEAM_BAND, FEATHER_RADIUS, FEATURE_DETECTOR
 from stitcher.algorithms import (
     mbs_saliency,
     canny_edge_detect,
@@ -15,7 +15,8 @@ from stitcher.algorithms import (
     homography_align,
     compute_overlap_masks,
     graph_cut_seam,
-    gradient_blend_local
+    gradient_blend_local,
+    sort_images_by_overlap
 )
 
 logger = get_logger(__name__)
@@ -27,7 +28,9 @@ class StitchingPipeline:
         self.image_paths = []
         self.config = {
             'SEAM_BAND': SEAM_BAND,
-            'FEATHER_RADIUS': FEATHER_RADIUS
+            'FEATHER_RADIUS': FEATHER_RADIUS,
+            'AUTO_SORT': True,
+            'FEATURE_DETECTOR': FEATURE_DETECTOR
         }
         self.result_image = None
         self.progress_callback = None
@@ -136,6 +139,15 @@ class StitchingPipeline:
                     return False
                 images.append(img)
                 self._report_progress(0, 1, f"正在加载图像 {idx}/{len(self.image_paths)}...")
+
+            if self.config.get('AUTO_SORT', True) and len(images) > 2:
+                self._report_progress(0, 1, "正在分析图像顺序...")
+                order = sort_images_by_overlap(
+                    images, 
+                    detector_type=self.config.get('FEATURE_DETECTOR', 'ORB')
+                )
+                images = [images[i] for i in order]
+                self.logger.info(f"图像排序结果: {order}")
 
             result = images[0]
             total_pairs = len(images) - 1
