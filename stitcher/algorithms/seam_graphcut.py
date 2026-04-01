@@ -182,8 +182,12 @@ def graph_cut_seam(
     """
     h, w = overlap.shape
 
+    # 先给整张画布一个"默认归属"：
+    # 非重叠区谁有效就归谁
+    select_img1_mask = (valid1 & ~valid2).copy()
+
     if not np.any(overlap):
-        return np.full((h, w), False, dtype=bool)
+        return select_img1_mask
 
     y0, y1, x0, x1 = _extract_overlap_roi(overlap)
 
@@ -210,7 +214,14 @@ def graph_cut_seam(
         seeds, valid1_roi, valid2_roi, overlap_roi
     )
 
-    select_img1_mask = np.full((h, w), False, dtype=bool)
-    select_img1_mask[y0:y1, x0:x1] = labels_roi.astype(bool)
+    # 只在 overlap 内使用 graph cut 的结果
+    roi_mask = select_img1_mask[y0:y1, x0:x1]
+    roi_mask[overlap_roi] = labels_roi[overlap_roi].astype(bool)
 
+    # ROI margin 内的非重叠区仍然按 valid 归属
+    roi_mask[valid1_roi & ~valid2_roi] = True
+    roi_mask[~valid1_roi & valid2_roi] = False
+    roi_mask[~valid1_roi & ~valid2_roi] = False
+
+    select_img1_mask[y0:y1, x0:x1] = roi_mask
     return select_img1_mask

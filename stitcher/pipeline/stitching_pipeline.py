@@ -138,7 +138,7 @@ class StitchingPipeline:
         img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2 = self._align_pair_assets(
             moving_img, base_img, sal1, edge1, sal2, edge2, h_matrix
         )
-        _, _, overlap = compute_overlap_masks(img1_w, img2_w)
+        overlap = valid1 & valid2
 
         self._report_progress(global_step_offset + 4, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行图割接缝选择...")
         select_img1_mask = self._compute_seam_selection(
