@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import time
+import pickle
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -20,6 +21,10 @@ from stitcher.algorithms import (
 
 logger = get_logger(__name__)
 
+# 缓存文件路径
+CACHE_DIR = Path(__file__).parent.parent.parent / 'cache'
+CACHE_DIR.mkdir(exist_ok=True)
+
 
 @dataclass
 class PairCacheEntry:
@@ -36,21 +41,58 @@ class PairCacheEntry:
 class PairCache:
     def __init__(self):
         self.cache = {}
+        self._load_from_disk()
     
     def get(self, key):
         return self.cache.get(key)
     
     def set(self, key, entry):
         self.cache[key] = entry
+        self._save_to_disk()
     
     def clear(self):
         self.cache.clear()
+        self._save_to_disk()
+    
+    def _get_cache_file(self):
+        return CACHE_DIR / 'pair_cache.pkl'
+    
+    def _save_to_disk(self):
+        try:
+            # 只保存关键信息，不保存完整图像数据
+            # 注意：这里只是示例，实际中需要更复杂的序列化策略
+            # 由于图像数据较大，不建议直接序列化到文件
+            # 这里仅作为演示
+            pass
+        except Exception as e:
+            logger.warning(f"保存缓存到磁盘失败: {e}")
+    
+    def _load_from_disk(self):
+        try:
+            # 从磁盘加载缓存
+            # 注意：这里只是示例，实际中需要更复杂的反序列化策略
+            pass
+        except Exception as e:
+            logger.warning(f"从磁盘加载缓存失败: {e}")
 
 
 def compute_image_hash(img):
     if img is None:
         return 0
-    return hash(img.tobytes())
+    # 使用更高效的哈希方法：计算图像的平均像素值和形状作为哈希
+    # 对于大图，只采样中心区域
+    h, w = img.shape[:2]
+    # 采样中心 100x100 区域
+    sample_h = min(100, h)
+    sample_w = min(100, w)
+    start_h = (h - sample_h) // 2
+    start_w = (w - sample_w) // 2
+    sample = img[start_h:start_h+sample_h, start_w:start_w+sample_w]
+    # 计算各通道的平均值
+    mean_values = np.mean(sample, axis=(0, 1))
+    # 结合形状和均值生成哈希
+    hash_value = hash((h, w, tuple(mean_values.tolist())))
+    return hash_value
 
 
 class StitchingPipeline:
@@ -152,6 +194,7 @@ class StitchingPipeline:
         pair_prefix = f"第 {pair_index}/{total_pairs} 组"
         seam_band_size = self.config.get('SEAM_BAND', 9)
         feather_radius = self.config.get('FEATHER_RADIUS', 11)
+        timing_info = {}
 
         # 计算缓存键
         moving_hash = compute_image_hash(moving_img)
@@ -168,17 +211,23 @@ class StitchingPipeline:
             )
         else:
             # 执行完整流程
+            start_time = time.time()
             sal1, sal2, edge1, edge2, h_matrix = self._prepare_pair(
                 moving_img, base_img, pair_prefix, global_step_offset, total_pairs
             )
+            timing_info['prepare'] = time.time() - start_time
             
+            start_time = time.time()
             img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2, overlap = self._align_pair(
                 moving_img, base_img, sal1, sal2, edge1, edge2, h_matrix, pair_prefix, global_step_offset, total_pairs
             )
+            timing_info['align'] = time.time() - start_time
             
+            start_time = time.time()
             label_map, base, seam_line = self._cut_pair(
                 img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2, overlap, pair_prefix, global_step_offset, total_pairs
             )
+            timing_info['cut'] = time.time() - start_time
             
             # 缓存中间结果
             cache_entry = PairCacheEntry(
@@ -194,10 +243,13 @@ class StitchingPipeline:
             self.pair_cache.set(cache_key, cache_entry)
 
         # 执行融合阶段（每次都需要重新执行，因为参数可能变化）
+        start_time = time.time()
         result = self._blend_pair(
             img1_w, base, seam_line, overlap, seam_band_size, feather_radius, pair_prefix, global_step_offset, total_pairs
         )
+        timing_info['blend'] = time.time() - start_time
         
+        self.logger.info(f"{pair_prefix} 阶段耗时: {timing_info}")
         return result
 
     def run(self, output_path=None, preview_path=None):

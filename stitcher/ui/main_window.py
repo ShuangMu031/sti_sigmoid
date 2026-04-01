@@ -475,6 +475,13 @@ class StitchingGUI:
         self._set_processing_state(False)
         self._cleanup_worker_resources(remove_temp_file=False)
         self._cleanup_temp_result()
+        
+        # 清理预览图临时文件
+        if preview_path and os.path.exists(preview_path):
+            try:
+                os.remove(preview_path)
+            except OSError as e:
+                logger.warning(f"无法删除预览临时文件 {preview_path}: {e}")
 
         messagebox.showinfo("成功", "图像拼接完成!")
 
