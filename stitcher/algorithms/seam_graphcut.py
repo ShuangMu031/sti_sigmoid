@@ -108,9 +108,9 @@ def _build_seed_constraints(valid1_roi, valid2_roi, overlap_roi):
     return seed_source_roi, seed_sink_roi, INF
 
 
-def _solve_graphcut(node_ids_roi, unary1, unary2, smooth, seeds, valid1_roi, valid2_roi, overlap_roi):
+def _solve_graphcut(unary1, unary2, smooth, seeds, valid1_roi, valid2_roi, overlap_roi):
     g = maxflow.Graph[float]()
-    g.add_grid_nodes(node_ids_roi.shape)
+    node_ids_roi = g.add_grid_nodes(overlap_roi.shape)
     
     seed_source_roi, seed_sink_roi, INF = seeds
     
@@ -197,10 +197,6 @@ def graph_cut_seam(
     valid2_roi = valid2[y0:y1, x0:x1]
     overlap_roi = overlap[y0:y1, x0:x1]
 
-    h_roi, w_roi = overlap_roi.shape
-    g = maxflow.Graph[float]()
-    node_ids_roi = g.add_grid_nodes((h_roi, w_roi))
-
     data1_roi, data2_roi, smooth_roi, _ = _build_unary_cost(
         img1_roi, img2_roi,
         sal1_roi, sal2_roi,
@@ -210,7 +206,7 @@ def graph_cut_seam(
 
     seeds = _build_seed_constraints(valid1_roi, valid2_roi, overlap_roi)
     labels_roi = _solve_graphcut(
-        node_ids_roi, data1_roi, data2_roi, smooth_roi,
+        data1_roi, data2_roi, smooth_roi,
         seeds, valid1_roi, valid2_roi, overlap_roi
     )
 

@@ -17,6 +17,11 @@ def _build_mask_index(mask):
     return idx_map, coords, N
 
 
+def _boundary_value(target, y, x, ny, nx):
+    if 0 <= ny < target.shape[0] and 0 <= nx < target.shape[1]:
+        return target[ny, nx]
+    return target[y, x]
+
 def _assemble_poisson_system(source, target, mask, idx_map, coords, N):
     source = source.astype(np.float64)
     target = target.astype(np.float64)
@@ -53,19 +58,13 @@ def _assemble_poisson_system(source, target, mask, idx_map, coords, N):
 
                 b[i] += grad
             else:
-                if POISSON_NEIGHBOR_MODE == "target_neighbor":
-                    if 0 <= ny < target.shape[0] and 0 <= nx < target.shape[1]:
-                        b[i] += target[ny, nx]
-                    else:
-                        b[i] += target[y, x]
-                else:
-                    b[i] += target[y, x]
+                b[i] += _boundary_value(target, y, x, ny, nx)
 
     A = sp.csr_matrix((data, (rows, cols)), shape=(N, N))
     return A, b
 
 
-def _solve_poisson_channels(A, b, N):
+def _solve_poisson_channels(A, b):
     result_channels = []
     
     if POISSON_USE_FACTORIZED:
@@ -96,7 +95,7 @@ def gradient_blend_local(source, target, mask):
         return target.astype(np.uint8)
     
     A, b = _assemble_poisson_system(source, target, mask, idx_map, coords, N)
-    sol_channels = _solve_poisson_channels(A, b, N)
+    sol_channels = _solve_poisson_channels(A, b)
     
     result = target.copy()
     result = _write_back_solution(result, coords, sol_channels)
