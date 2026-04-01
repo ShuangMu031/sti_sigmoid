@@ -12,6 +12,7 @@ from stitcher.config import (
     FEATURE_N_OCTAVE_LAYERS,
     FEATURE_PATCH_SIZE,
     SIFT_EDGE_THRESH,
+    AKAZE_THRESHOLD,
     FLANN_INDEX_PARAMS,
     FLANN_SEARCH_PARAMS,
     USE_FLANN
@@ -39,7 +40,7 @@ def create_feature_detector(detector_type=None):
     elif detector_type.upper() == 'AKAZE':
         return cv2.AKAZE_create(
             descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB_UPRIGHT,
-            threshold=0.001,
+            threshold=AKAZE_THRESHOLD,
             nOctaves=FEATURE_N_OCTAVE_LAYERS,
             nOctaveLayers=4
         )
@@ -65,64 +66,47 @@ def create_matcher(descriptor_type='ORB'):
         return cv2.BFMatcher()
 
 
-def registerTexture(img1, edge1, img2, edge2, detector_type=None):
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-
-    gray1 = (gray1 * edge1).astype(np.uint8)
-    gray2 = (gray2 * edge2).astype(np.uint8)
-
-    # 尝试使用指定的检测器，如果失败则自动尝试其他检测器
+def _build_detector_try_order(detector_type):
     detectors_to_try = [detector_type] if detector_type else []
     
-    # 添加备用检测器
     if 'ORB' not in detectors_to_try:
         detectors_to_try.append('ORB')
     if 'SIFT' not in detectors_to_try:
         detectors_to_try.append('SIFT')
     if 'AKAZE' not in detectors_to_try:
         detectors_to_try.append('AKAZE')
+    
+    return detectors_to_try
 
-    last_error = None
-    for det_type in detectors_to_try:
-        try:
-            logger.info(f"尝试使用 {det_type} 检测器")
-            detector = create_feature_detector(det_type)
-            kp1, des1 = detector.detectAndCompute(gray1, None)
-            kp2, des2 = detector.detectAndCompute(gray2, None)
 
-            if des1 is None or des2 is None:
-                last_error = f"{det_type} 特征检测失败"
-                continue
-
-            matcher = create_matcher(det_type)
-            matches = matcher.knnMatch(des1, des2, k=2)
-
-            good = []
-            for match_pair in matches:
-                if len(match_pair) < 2:
-                    continue
-                m, n = match_pair
-                if m.distance < FEATURE_RATIO_THRESH * n.distance:
-                    good.append(m)
-
-            if len(good) < 8:
-                last_error = f"{det_type} 匹配点不足"
-                continue
-
-            # 成功找到足够的匹配点
-            logger.info(f"成功使用 {det_type} 检测器，找到 {len(good)} 个匹配点")
-            break
-        except Exception as e:
-            last_error = f"{det_type} 处理失败: {str(e)}"
-            logger.warning(last_error)
+def _detect_and_match(gray1, gray2, det_type):
+    detector = create_feature_detector(det_type)
+    kp1, des1 = detector.detectAndCompute(gray1, None)
+    kp2, des2 = detector.detectAndCompute(gray2, None)
+    
+    if des1 is None or des2 is None:
+        return None, None, None, None, f"{det_type} 特征检测失败"
+    
+    matcher = create_matcher(det_type)
+    matches = matcher.knnMatch(des1, des2, k=2)
+    
+    good = []
+    for match_pair in matches:
+        if len(match_pair) < 2:
             continue
-    else:
-        # 所有检测器都失败
-        raise RuntimeError(f"所有特征检测器都失败: {last_error}")
+        m, n = match_pair
+        if m.distance < FEATURE_RATIO_THRESH * n.distance:
+            good.append(m)
+    
+    if len(good) < 8:
+        return None, None, None, None, f"{det_type} 匹配点不足"
+    
+    return kp1, kp2, good, det_type, None
 
-    pts1 = np.array([kp1[m.queryIdx].pt for m in good])
-    pts2 = np.array([kp2[m.trainIdx].pt for m in good])
+
+def _deduplicate_matches(kp1, kp2, good_matches):
+    pts1 = np.array([kp1[m.queryIdx].pt for m in good_matches])
+    pts2 = np.array([kp2[m.trainIdx].pt for m in good_matches])
 
     _, idx = np.unique(pts1, axis=0, return_index=True)
     pts1, pts2 = pts1[idx], pts2[idx]
@@ -132,10 +116,14 @@ def registerTexture(img1, edge1, img2, edge2, detector_type=None):
 
     if len(pts1) < 8:
         raise RuntimeError("Too few matches after unique filter")
+    
+    return pts1, pts2
 
+
+def _estimate_homography(pts1, pts2, img1_shape):
     pts1, pts2 = _histogram_filter(
         pts1, pts2,
-        img1.shape,
+        img1_shape,
         thr=HIST_SHIFT_BIN_RATIO
     )
 
@@ -224,3 +212,42 @@ def _calc_homography_normalized(pts_src, pts_dst):
 
     H = np.linalg.inv(T2) @ Hn @ T1
     return H / H[2, 2]
+
+
+def registerTexture(img1, edge1, img2, edge2, detector_type=None):
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+    gray1 = (gray1 * edge1).astype(np.uint8)
+    gray2 = (gray2 * edge2).astype(np.uint8)
+
+    detector_type = (detector_type or FEATURE_DETECTOR).upper()
+    detectors_to_try = _build_detector_try_order(detector_type)
+
+    last_error = None
+    success_result = None
+    
+    for det_type in detectors_to_try:
+        try:
+            logger.info(f"尝试使用 {det_type} 检测器")
+            kp1, kp2, good, det_success, error_msg = _detect_and_match(gray1, gray2, det_type)
+            
+            if error_msg:
+                last_error = error_msg
+                continue
+            
+            logger.info(f"成功使用 {det_type} 检测器，找到 {len(good)} 个匹配点")
+            pts1, pts2 = _deduplicate_matches(kp1, kp2, good)
+            h_matrix = _estimate_homography(pts1, pts2, img1.shape)
+            success_result = h_matrix
+            break
+            
+        except Exception as e:
+            last_error = f"{det_type} 处理失败: {str(e)}"
+            logger.warning(last_error)
+            continue
+    
+    if success_result is not None:
+        return success_result
+    else:
+        raise RuntimeError(f"所有特征检测器都失败: {last_error}")

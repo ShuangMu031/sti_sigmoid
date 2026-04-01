@@ -17,9 +17,7 @@ from stitcher.algorithms import (
     compute_overlap_masks,
     graph_cut_seam,
     gradient_blend_local,
-    sort_images_by_overlap,
-    LABEL_SELECT_IMG1,
-    LABEL_SELECT_IMG2
+    sort_images_by_overlap
 )
 
 logger = get_logger(__name__)
@@ -52,75 +50,64 @@ class StitchingPipeline:
     def update_config(self, new_config):
         self.config.update(new_config)
 
-    def _extract_seam_line(self, label_map, overlap):
-        seam = np.zeros_like(label_map, np.uint8)
-        seam[:, 1:] |= (label_map[:, 1:] != label_map[:, :-1])
-        seam[1:, :] |= (label_map[1:, :] != label_map[:-1, :])
-        seam &= overlap.astype(np.uint8)
-        return seam
-
     def _extract_features(self, img):
-        """提取图像特征"""
         sal = mbs_saliency(img)
         edge, _ = canny_edge_detect(img)
         return sal, edge
 
-    def _stitch_pair(self, moving_img, base_img, pair_index=1, total_pairs=1, global_step_offset=0):
-        phase_total = 7
-        pair_prefix = f"第 {pair_index}/{total_pairs} 组"
-
-        seam_band_size = self.config.get('SEAM_BAND', 9)
-        feather_radius = self.config.get('FEATHER_RADIUS', 11)
-
-        self._report_progress(global_step_offset + 1, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行显著性和边缘检测...")
-        
-        # 并行处理特征提取
+    def _extract_features_pair(self, moving_img, base_img):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future1 = executor.submit(self._extract_features, moving_img)
             future2 = executor.submit(self._extract_features, base_img)
             sal1, edge1 = future1.result()
             sal2, edge2 = future2.result()
+        return sal1, edge1, sal2, edge2
 
-        self._report_progress(global_step_offset + 2, max(total_pairs * phase_total, 1), f"{pair_prefix}：计算单应性变换矩阵...")
-        detector_type = self.config.get('FEATURE_DETECTOR', 'ORB')
+    def _estimate_pair_homography(self, moving_img, base_img, edge1, edge2, detector_type):
         h_matrix = registerTexture(moving_img, edge1, base_img, edge2, detector_type=detector_type)
-        self.logger.info(f"{pair_prefix} 单应性变换矩阵: {h_matrix}")
+        return h_matrix
 
-        self._report_progress(global_step_offset + 3, max(total_pairs * phase_total, 1), f"{pair_prefix}：图像对齐中...")
+    def _align_pair_assets(self, moving_img, base_img, sal1, edge1, sal2, edge2, h_matrix):
         img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2 = homography_align(
             moving_img, sal1, edge1,
             base_img, sal2, edge2,
             h_matrix
         )
+        return img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2
 
-        _, _, overlap = compute_overlap_masks(img1_w, img2_w)
-
-        self._report_progress(global_step_offset + 4, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行图割接缝选择...")
-        label_map = graph_cut_seam(
+    def _compute_seam_selection(self, img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2, overlap):
+        select_img1_mask = graph_cut_seam(
             img1_w, img2_w,
             sal1_w, sal2_w,
             edge1_w, edge2_w,
             valid1, valid2,
             overlap
         )
+        return select_img1_mask
 
-        self._report_progress(global_step_offset + 5, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行硬合成...")
+    def _compose_hard_merge(self, img1_w, img2_w, select_img1_mask):
         base = img2_w.copy()
-        # LABEL_SELECT_IMG1=0: 选择img1_w的像素, LABEL_SELECT_IMG2=1: 选择img2_w的像素
-        # label_map == LABEL_SELECT_IMG1 时，我们用img1_w替换base中的像素
-        base[label_map == LABEL_SELECT_IMG1] = img1_w[label_map == LABEL_SELECT_IMG1]
+        base[select_img1_mask] = img1_w[select_img1_mask]
+        return base
 
-        seam_line = self._extract_seam_line(label_map, overlap)
+    def _extract_seam_line_from_mask(self, select_img1_mask, overlap):
+        seam = np.zeros_like(select_img1_mask, dtype=np.uint8)
+        seam[:, 1:] |= (select_img1_mask[:, 1:] != select_img1_mask[:, :-1])
+        seam[1:, :] |= (select_img1_mask[1:, :] != select_img1_mask[:-1, :])
+        seam &= overlap.astype(np.uint8)
+        return seam
 
-        self._report_progress(global_step_offset + 6, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行局部梯度融合...")
+    def _blend_seam_region(self, img1_w, base, overlap, seam_line, seam_band_size, feather_radius):
+        seam_band_size = max(1, int(seam_band_size))
+        feather_radius = max(1, int(feather_radius))
+        
         kernel = np.ones((seam_band_size, seam_band_size), np.uint8)
         seam_band = cv2.dilate(seam_line.astype(np.uint8), kernel)
         seam_band = cv2.erode(seam_band, np.ones((3, 3), np.uint8), iterations=2)
         poisson_mask = seam_band.astype(bool) & overlap
-
+        
         result = gradient_blend_local(img1_w, base, poisson_mask)
-
-        self._report_progress(global_step_offset + 7, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行羽化平滑...")
+        
         alpha = cv2.GaussianBlur(
             seam_band.astype(np.float32),
             (0, 0),
@@ -128,31 +115,52 @@ class StitchingPipeline:
         )
         alpha = alpha / (alpha.max() + 1e-6)
         alpha = np.clip(alpha, 0, 1)[..., None]
-
+        
         result = (1 - alpha) * result + alpha * base
+        return result, seam_band, poisson_mask
+
+    def _stitch_pair(self, moving_img, base_img, pair_index=1, total_pairs=1, global_step_offset=0):
+        phase_total = 7
+        pair_prefix = f"第 {pair_index}/{total_pairs} 组"
+
+        seam_band_size = self.config.get('SEAM_BAND', 9)
+        feather_radius = self.config.get('FEATHER_RADIUS', 11)
+        detector_type = self.config.get('FEATURE_DETECTOR', 'ORB')
+
+        self._report_progress(global_step_offset + 1, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行显著性和边缘检测...")
+        sal1, edge1, sal2, edge2 = self._extract_features_pair(moving_img, base_img)
+
+        self._report_progress(global_step_offset + 2, max(total_pairs * phase_total, 1), f"{pair_prefix}：计算单应性变换矩阵...")
+        h_matrix = self._estimate_pair_homography(moving_img, base_img, edge1, edge2, detector_type)
+        self.logger.info(f"{pair_prefix} 单应性变换矩阵: {h_matrix}")
+
+        self._report_progress(global_step_offset + 3, max(total_pairs * phase_total, 1), f"{pair_prefix}：图像对齐中...")
+        img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2 = self._align_pair_assets(
+            moving_img, base_img, sal1, edge1, sal2, edge2, h_matrix
+        )
+        _, _, overlap = compute_overlap_masks(img1_w, img2_w)
+
+        self._report_progress(global_step_offset + 4, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行图割接缝选择...")
+        select_img1_mask = self._compute_seam_selection(
+            img1_w, img2_w, sal1_w, sal2_w, edge1_w, edge2_w, valid1, valid2, overlap
+        )
+
+        self._report_progress(global_step_offset + 5, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行硬合成...")
+        base = self._compose_hard_merge(img1_w, img2_w, select_img1_mask)
+        seam_line = self._extract_seam_line_from_mask(select_img1_mask, overlap)
+
+        self._report_progress(global_step_offset + 6, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行局部梯度融合...")
+        result, seam_band, poisson_mask = self._blend_seam_region(
+            img1_w, base, overlap, seam_line, seam_band_size, feather_radius
+        )
+
+        self._report_progress(global_step_offset + 7, max(total_pairs * phase_total, 1), f"{pair_prefix}：执行羽化平滑...")
+        
+        self.logger.info(f"{pair_prefix} overlap像素: {overlap.sum()}, seam band像素: {seam_band.sum()}, Poisson mask像素: {poisson_mask.sum()}, 当前detector: {detector_type}")
+        
         return result.astype(np.uint8)
 
     def run(self, output_path=None):
-        """
-        执行图像拼接流程。
-
-        当前实现：顺序拼接 (Sequential Stitching)
-            - 按顺序逐张拼接图像
-            - 当前一张作为移动图像，新图作为基础图像
-            - 注意：这种方法简单但可能累积误差，适合作为MVP版本
-
-        未来可扩展方向：
-            - Bundle Adjustment / 全局配准
-            - 光束法平差 (Bundle Adjustment)
-            - 同时优化所有图像的变换矩阵
-            - 减少误差累积
-
-        参数:
-            output_path: 输出文件路径，可选
-
-        返回:
-            拼接结果图像，或False表示失败
-        """
         try:
             t0 = time.time()
 
@@ -184,13 +192,6 @@ class StitchingPipeline:
                 images = [images[i] for i in order]
                 self.logger.info(f"图像排序结果: {order}")
 
-            # TODO: 未来实现全局配准版本
-            # - 计算所有图像间的单应性矩阵
-            # - 构建连接图
-            # - 执行全局优化
-            # - 使用Bundle Adjustment优化所有变换
-
-            # 当前：顺序拼接版本
             result = images[0]
             total_pairs = len(images) - 1
             total_steps = max(total_pairs * 7, 1)
