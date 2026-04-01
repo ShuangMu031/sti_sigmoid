@@ -438,26 +438,33 @@ class StitchingGUI:
     def _handle_result_message(self, message):
         msg_type = message[0]
         if msg_type == "done":
-            _, output_path, stitching_time = message
+            _, output_path, preview_path, stitching_time = message
             self.last_stitching_time = stitching_time
-            self._handle_worker_success(output_path, stitching_time)
+            self._handle_worker_success(output_path, preview_path, stitching_time)
         elif msg_type == "error":
             _, error_message = message
             self._handle_worker_error(error_message)
         else:
             self._handle_worker_error(f"收到未知结果消息: {message}")
 
-    def _handle_worker_success(self, output_path, stitching_time):
+    def _handle_worker_success(self, output_path, preview_path, stitching_time):
         self.root.title("图像自动拼接系统—sigmoid")
         self.stitching_time_label.config(text=f"拼接时间: {stitching_time:.2f}s")
 
-        result = cv_imread(output_path)
-        if result is None:
+        # 读取完整结果（用于保存）
+        full_result = cv_imread(output_path)
+        if full_result is None:
             self._handle_worker_error(f"结果文件存在但无法读取: {output_path}")
             return
 
-        self.result_image = result
-        self._display_result(self.result_image)
+        # 读取预览图（用于显示）
+        preview_result = cv_imread(preview_path)
+        if preview_result is None:
+            self._handle_worker_error(f"预览文件存在但无法读取: {preview_path}")
+            return
+
+        self.result_image = full_result
+        self._display_result(preview_result)
         self.status_var.set("拼接完成")
         self.progress_var.set(100)
         self.progress_label.config(text="拼接完成")

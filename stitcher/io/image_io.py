@@ -36,7 +36,12 @@ class ImageIOHandler:
         return cv_imread(image_path)
     
     def load_images(self, image_paths):
-        return [self.load_image(p) for p in image_paths if self.load_image(p) is not None]
+        loaded_images = []
+        for p in image_paths:
+            img = self.load_image(p)
+            if img is not None:
+                loaded_images.append(img)
+        return loaded_images
     
     def save_image(self, image, output_path, quality=95, create_dir=True):
         if create_dir:
